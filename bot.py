@@ -11,6 +11,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     ConversationHandler,
+    Application,
 )
 
 # --- CONFIGURATION ---
@@ -168,24 +169,38 @@ def run_health_check():
     httpd.serve_forever()
 
 # --- MAIN ENTRY POINT ---
-if __name__ == '__main__':
-    # 1. Start health check thread
+async def main():
+    # Start health check thread
     threading.Thread(target=run_health_check, daemon=True).start()
 
-    # 2. Build the Application
-    # Using local_mode=False is default but good to be explicit for Render
+    # Build the Application
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # 3. Add Conversation Handler
+    # Add Conversation Handler
+    # Note: per_message=False is now set explicitly to remove PTB warnings
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
             QUIZ_STATE: [CallbackQueryHandler(handle_quiz)]
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('cancel', cancel)],
+        per_message=False 
     )
 
     application.add_handler(conv_handler)
 
-    logger.info("Bot is starting polling...")
-    application.run_polling()
+    async with application:
+        await application.initialize()
+        await application.start()
+        logger.info("Bot is starting polling...")
+        await application.updater.start_polling()
+        # Keep the application running
+        while True:
+            await asyncio.sleep(1)
+
+if __name__ == '__main__':
+    try:
+        # Use asyncio.run for cleaner event loop management in Python 3.10+
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped.")
