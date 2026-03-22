@@ -1,8 +1,9 @@
 import os
 import logging
 import asyncio
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -13,15 +14,20 @@ from telegram.ext import (
 )
 
 # --- CONFIGURATION ---
-# Get your token from @BotFather
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+# Get your token from Render Environment Variables
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 PORT = int(os.environ.get("PORT", 8080))
 
+# Pre-flight check: If TOKEN is empty, the bot cannot start.
+if not TOKEN:
+    print("ERROR: TELEGRAM_BOT_TOKEN environment variable is not set!")
+    print("Please add it in the Render Dashboard -> Environment section.")
+    sys.exit(1)
+
 # States for ConversationHandler
-QUIZ = 1
+QUIZ_STATE = 1
 
 # --- QUIZ DATA ---
-# Content is tailored to be professional and educational (Telegram Ad Policy compliant)
 QUIZ_QUESTIONS = [
     {
         "question": "What does 'SEO' stand for in digital marketing?",
@@ -56,7 +62,11 @@ QUIZ_QUESTIONS = [
 ]
 
 # Logging setup
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # --- BOT LOGIC ---
 
@@ -72,20 +82,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("Start Quiz", callback_data="start_quiz")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
-    return QUIZ
+    if update.message:
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    else:
+        # Handle case where /start is called from a button callback
+        await update.callback_query.message.reply_text(welcome_text, reply_markup=reply_markup)
+        
+    return QUIZ_STATE
 
 async def handle_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the quiz flow: asking questions and checking answers."""
     query = update.callback_query
     await query.answer()
     
-    # Initialize or update state
-    if 'current_q' not in context.user_data or query.data == "start_quiz":
+    # Initialization
+    if query.data == "start_quiz":
         context.user_data['current_q'] = 0
         context.user_data['score'] = 0
-
-    current_idx = context.user_data['current_q']
+    
+    current_idx = context.user_data.get('current_q', 0)
 
     # Process previous answer if applicable
     if query.data.startswith("ans_"):
@@ -98,20 +113,22 @@ async def handle_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             feedback = f"Incorrect. ❌ The right answer was: {prev_q['options'][prev_q['correct']]}"
         
+        # Edit the previous message with feedback
         await query.edit_message_text(f"{feedback}\n\n{prev_q['explanation']}")
-        await asyncio.sleep(2) # Brief pause for reading
         
+        # Increment index
         current_idx += 1
         context.user_data['current_q'] = current_idx
+        await asyncio.sleep(1.5) # Slight delay for readability
 
-    # End of Quiz
+    # End of Quiz check
     if current_idx >= len(QUIZ_QUESTIONS):
-        score = context.user_data['score']
+        score = context.user_data.get('score', 0)
         finish_text = (
             f"You finished the quiz! 🏆\n"
             f"Your Score: {score}/{len(QUIZ_QUESTIONS)}\n\n"
             "Great effort. You have completed this week's Digital Marketing curriculum.\n\n"
-            "📅 Please come back next week to learn more about advanced strategies and test your skills again!"
+            "📅 Come back next week for more!"
         )
         await query.message.reply_text(finish_text)
         return ConversationHandler.END
@@ -127,41 +144,48 @@ async def handle_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Question {current_idx + 1}/{len(QUIZ_QUESTIONS)}:\n\n{q['question']}",
         reply_markup=reply_markup
     )
-    return QUIZ
+    return QUIZ_STATE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Quiz cancelled. Send /start to try again whenever you're ready.")
+    await update.message.reply_text("Quiz cancelled. Send /start to try again.")
     return ConversationHandler.END
 
-# --- RENDER HEALTH CHECK ---
+# --- RENDER HEALTH CHECK SERVER ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
         self.end_headers()
         self.wfile.write(b"Bot is running")
 
+    def log_message(self, format, *args):
+        return # Disable logging for health checks to keep console clean
+
 def run_health_check():
-    server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
-    server.serve_forever()
+    server_address = ('0.0.0.0', PORT)
+    httpd = HTTPServer(server_address, HealthCheckHandler)
+    logger.info(f"Health check server starting on port {PORT}...")
+    httpd.serve_forever()
 
 # --- MAIN ENTRY POINT ---
 if __name__ == '__main__':
-    # Start health check in a separate thread so Render doesn't shut down the service
+    # 1. Start health check thread
     threading.Thread(target=run_health_check, daemon=True).start()
 
-    # Build the Application
+    # 2. Build the Application
+    # Using local_mode=False is default but good to be explicit for Render
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # Add Conversation Handler
+    # 3. Add Conversation Handler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            QUIZ: [CallbackQueryHandler(handle_quiz)]
+            QUIZ_STATE: [CallbackQueryHandler(handle_quiz)]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
     application.add_handler(conv_handler)
 
-    print(f"Bot started on port {PORT}...")
+    logger.info("Bot is starting polling...")
     application.run_polling()
